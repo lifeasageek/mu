@@ -575,7 +575,7 @@ found."
 		((or (memq 'unread flags) (memq 'new flags))
 		 'mu4e-unread-face)
 		((memq 'flagged flags) 'mu4e-flagged-face)
-		((memq 'replied flags) 'mu4e-replied-face)
+		((memq 'replied flags) 'mu4e-header-face)
 		((memq 'passed flags)  'mu4e-forwarded-face)
 		 (t                     'mu4e-header-face))))
     ;; hmmm, this only works with emacs 24.4+
