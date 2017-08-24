@@ -1270,9 +1270,9 @@ If CMD is nil, ask user for it."
 	 (ext (file-name-extension (plist-get att :name)))
 	 (cmd (or cmd
 		  (read-string
-		   (mu4e-format "Shell command to open it with: ")
+		   (mu4e-format "Shell command to open it with (default: xdg-open):")
 		   (assoc-default ext mu4e-view-attachment-assoc)
-		   'mu4e~view-open-with-hist)))
+		   'mu4e~view-open-with-hist "xdg-open")))
 	 (index (plist-get att :index)))
     (mu4e~view-temp-action
       (mu4e-message-field msg :docid) index "open-with" cmd)))
