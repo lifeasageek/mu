@@ -1,4 +1,4 @@
-## Copyright (C) 2008-2015 Dirk-Jan C. Binnema <djcb@djcbsoftware.nl>
+c## Copyright (C) 2008-2017 Dirk-Jan C. Binnema <djcb@djcbsoftware.nl>
 ##
 ## This program is free software; you can redistribute it and/or modify
 ## it under the terms of the GNU General Public License as published by
@@ -14,13 +14,28 @@
 ## along with this program; if not, write to the Free Software Foundation,
 ## Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 
-AC_INIT([mu],[0.9.17],[https://github.com/djcb/mu/issues],[mu])
+AC_PREREQ([2.68])
+AC_INIT([mu],[0.9.19],[https://github.com/djcb/mu/issues],[mu])
+AC_COPYRIGHT([Copyright (C) 2008-2016 Dirk-Jan C. Binnema])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_SRCDIR([mu/mu.cc])
 # libtoolize wants to put some stuff in here; if you have an old
 # autotools/libtool setup. you can try to comment this out
 AC_CONFIG_MACRO_DIR([m4])
-AM_INIT_AUTOMAKE
+AC_CONFIG_AUX_DIR([build-aux])
+
+m4_ifndef([AX_COMPILER_FLAGS],[
+    AC_MSG_ERROR([
+  *** autoconf-archive >= 20150925 required for the build setup.
+  *** Please install it, or get an official release from
+  ***    https://github.com/djcb/mu/releases
+])
+])
+
+AX_IS_RELEASE([git-directory])
+AX_CHECK_ENABLE_DEBUG([yes])
+
+AM_INIT_AUTOMAKE([1.14 foreign no-dist-gzip tar-ustar dist-xz])
 
 # silent build if we have a new enough automake
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
@@ -36,6 +51,8 @@ AC_PROG_CC_STDC
 AC_PROG_CC_C99
 AC_PROG_INSTALL
 AC_HEADER_STDC
+
+AX_COMPILER_FLAGS(,,[yes])
 
 # for now, use AM_PROG_LIBTOOL, as we don't want to require
 # a too new setup for autotools/libtool
@@ -65,10 +82,24 @@ AS_IF([test "x$enable_mu4e" != "xno"], [
     emacs_version="`$EMACS --version | head -1`"
     lispdir="${lispdir}/mu4e/"
   ])
-  AS_CASE([$emacs_version],[*23*|*24*|*25*],[build_mu4e=yes],
+  AS_CASE([$emacs_version],[*23*|*24*|*25*|*26*],[build_mu4e=yes],
           [AC_WARN([emacs is too old to build mu4e (need emacs >= 23.x)])])
 ])
 AM_CONDITIONAL(BUILD_MU4E, test "x$build_mu4e" = "xyes")
+
+# Perl interface requires Data::SExpression
+build_perl=no
+AC_ARG_ENABLE([perl],
+  AS_HELP_STRING([--enable-perl],[Enable building the Perl interface]))
+AC_ARG_VAR([PERL], [the Perl interpreter command])
+AC_CHECK_PROGS([PERL], [perl], [no])
+AS_IF([test x"$enable_perl" = "xyes" -a x"$PERL" != "xno"], [
+    AM_PERL_MODULE([Data::SExpression],[build_perl=yes])
+    if test x"$build_perl" = "xyes"; then
+        perl_version=`$PERL -Iperl/lib -Mmup -e 'print "$mup::VERSION\n";'`
+    fi
+])
+AM_CONDITIONAL(BUILD_PERL, test "x$build_perl" = "xyes")
 
 # we need some special tricks for filesystems that don't have d_type;
 # e.g. Solaris. See mu-maildir.c. Explicitly disabling it is for
@@ -96,7 +127,7 @@ AS_IF([test "x$ac_cv_member_struct_dirent_d_ino" != "xyes"],
 
 
 # we need these
-AC_CHECK_FUNCS([memset memcpy realpath setlocale strerror getpass])
+AC_CHECK_FUNCS([memset memcpy realpath setlocale strerror getpass setsid])
 AC_CHECK_FUNC(timegm,[],[AC_MSG_ERROR([missing required function timegm])])
 
 # require pkg-config
@@ -109,13 +140,13 @@ AS_IF([test "x$PKG_CONFIG" = "xno"],[
 ])
 
 # glib2?
-# we need 2.14 at least, because we use GRegex
-PKG_CHECK_MODULES(GLIB,glib-2.0 >= 2.24 gobject-2.0 gio-2.0)
+# we pick some late-2012 version
+PKG_CHECK_MODULES(GLIB,glib-2.0 >= 2.32 gobject-2.0 gio-2.0)
 AC_SUBST(GLIB_CFLAGS)
 AC_SUBST(GLIB_LIBS)
 glib_version="`$PKG_CONFIG --modversion glib-2.0`"
 
-# gmime
+# gmime, some late-2012 version
 PKG_CHECK_MODULES(GMIME,gmime-2.6 >= 2.6.7)
 AC_SUBST(GMIME_CFLAGS)
 AC_SUBST(GMIME_LIBS)
@@ -269,6 +300,13 @@ contrib/Makefile
 ])
 AC_OUTPUT
 
+if test x"$build_perl" != "xno"; then
+   echo "Configuring Perl interface..."
+   cd perl
+   $PERL Makefile.PL
+   cd ..
+fi
+
 echo
 echo "mu configuration is complete."
 echo "------------------------------------------------"
@@ -299,6 +337,10 @@ if test "x$build_mu4e" = "xyes"; then
 echo "Emacs version                        : $emacs_version"
 fi
 
+#AM_COND_IF([BUILD_PERL],[
+#echo "Perl interface version               : $perl_version"
+#])
+
 echo
 echo "Have wordexp                         : $ac_cv_header_wordexp_h"
 echo "Build mu4e emacs frontend            : $build_mu4e"
@@ -307,7 +349,6 @@ AM_COND_IF([BUILD_GUI],[
 echo "Build 'mug' toy-ui (gtk+/webkit)     : yes"],[
 echo "Build 'mug' toy-ui (gtk+/webkit)     : no"
 ])
-
 
 echo "McCabe's Cyclomatic Complexity tool  : $have_pmccabe"
 echo
@@ -346,5 +387,5 @@ if test "x$ac_cv_header_wordexp_h" != "xyes"; then
 fi
 
 echo
-echo "Now, type 'make' to build mu (or 'make check' to run the unit tests, too)"
+echo "Now, type 'gmake' to build mu (or 'gmake check' to run the unit tests, too)"
 echo

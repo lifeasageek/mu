@@ -74,6 +74,7 @@ enum _MuConfigCmd {
 	MU_CONFIG_CMD_REMOVE,
 	MU_CONFIG_CMD_SCRIPT,
 	MU_CONFIG_CMD_SERVER,
+	MU_CONFIG_CMD_TICKLE,
 	MU_CONFIG_CMD_VERIFY,
 	MU_CONFIG_CMD_VIEW,
 
@@ -112,6 +113,8 @@ struct _MuConfig {
 	gboolean        rebuild;	/* empty the database before indexing */
 	gboolean        autoupgrade;    /* automatically upgrade db
 					 * when needed */
+	gboolean        lazycheck;      /* don't check dirs with up-to-date
+					 * timestamps */
 	int             xbatchsize;     /* batchsize for xapian
 					 * commits, or 0 for
 					 * default */

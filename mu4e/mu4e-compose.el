@@ -51,7 +51,8 @@
 ;;   a) move the message from drafts to the sent folder (maybe; depends on
 ;;      `mu4e-sent-messages-behavior')
 ;;   b) if it's a reply, mark the replied-to message as "R", i.e. replied
-;;      if it's a forward, mark the forwarded message as "P", i.e. passed (forwarded)
+;;      if it's a forward, mark the forwarded message as "P", i.e.
+;;      passed (forwarded)
 ;;   c) kill all buffers looking at the sent message
 
 ;;  a) is dealt with by message-mode, but we need to tell it where to move the
@@ -83,6 +84,8 @@
 (require 'mu4e-actions)
 (require 'mu4e-message)
 (require 'mu4e-draft)
+(require 'mu4e-context)
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Composing / Sending messages
@@ -103,19 +106,18 @@ Note, when using GMail/IMAP, you should set this to either
 copies in the sent folder.
 
 Alternatively, `mu4e-sent-messages-behavior' can be a function
-which takes no arguments, and which should return on of the mentioned symbols,
-for example:
+which takes no arguments, and which should return one of the mentioned
+symbols, for example:
 
   (setq mu4e-sent-messages-behavior (lambda ()
-        (if (string= (message-sendmail-envelope-from) \"foo@example.com\")
-                   'delete 'sent)))
+	(if (string= (message-sendmail-envelope-from) \"foo@example.com\")
+		   'delete 'sent)))
 
 The various `message-' functions from `message-mode' are available
 for querying the message information."
   :type '(choice (const :tag "move message to mu4e-sent-folder" sent)
 	   (const :tag "move message to mu4e-trash-folder" trash)
 	   (const :tag "delete message" delete))
-  :safe 'symbolp
   :group 'mu4e-compose)
 
 
@@ -135,19 +137,46 @@ contexts match, we have the following choices:
 
 Also see `mu4e-context-policy'."
   :type '(choice
-	   (const :tag "Always ask what context to use" 'always-ask)
-	   (const :tag "Ask if none of the contexts match" 'ask)
-	   (const :tag "Ask when there's no context yet" 'ask-if-none)
-	   (const :tag "Pick the first context if none match" 'pick-first)
+	   (const :tag "Always ask what context to use" always-ask)
+	   (const :tag "Ask if none of the contexts match" ask)
+	   (const :tag "Ask when there's no context yet" ask-if-none)
+	   (const :tag "Pick the first context if none match" pick-first)
 	   (const :tag "Don't change the context when none match" nil)
-  :safe 'symbolp
-  :group 'mu4e-compose))
+	   :safe 'symbolp
+	   :group 'mu4e-compose))
+
+
+(defcustom mu4e-compose-crypto-reply-policy 'sign-and-encrypt
+  "Policy for signing/encrypting replies to encrypted messages.
+We have the following choices:
+
+- `sign': sign the reply
+- `sign-and-encrypt': sign and encrypt the reply
+- `encrypt': encrypt the reply, but don't sign it.
+-  anything else: do nothing."
+  :type '(choice
+	   (const :tag "Sign the reply" sign)
+	   (const :tag "Sign and encrypt the reply" sign-and-encrypt)
+	   (const :tag "Encrypt the reply" encrypt)
+	   (const :tag "Don't do anything" nil)
+	   :safe 'symbolp
+	   :group 'mu4e-compose))
+
+(defcustom mu4e-compose-format-flowed nil
+  "Whether to compose messages to be sent as format=flowed (or
+   with long lines if `use-hard-newlines' is set to nil).  The
+   variable `fill-flowed-encode-column' lets you customize the
+   width beyond which format=flowed lines are wrapped."
+  :type 'boolean
+  :safe 'booleanp
+  :group 'mu4e-compose)
 
 (defcustom mu4e-compose-pre-hook nil
   "Hook run just *before* message composition starts.
 If the compose-type is either 'reply' or 'forward', the variable
 `mu4e-compose-parent-message' points to the message replied to /
-being forwarded / edited.
+being forwarded / edited, and `mu4e-compose-type' contains the
+type of message to be composed.
 
 Note that there is no draft message yet when this hook runs, it
 is meant for influencing the how mu4e constructs the draft
@@ -156,23 +185,33 @@ it has been constructed, `mu4e-compose-mode-hook' would be the
 place to do that."
   :type 'hook
   :group 'mu4e-compose)
+
+(defvar mu4e-compose-type nil
+  "The compose-type for this buffer, which is a symbol, `new',
+  `forward', `reply' or `edit'.")
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+
+(defun mu4e-compose-attach-message (msg)
+  "Insert message MSG as an attachment."
+  (let ((path (plist-get msg :path)))
+    (unless (file-exists-p path)
+      (mu4e-warn "Message file not found"))
+    (mml-attach-file
+      path
+      "message/rfc822"
+      (or (plist-get msg :subject) "No subject")
+      "attachment")))
 
 (defun mu4e-compose-attach-captured-message ()
   "Insert the last captured message file as an attachment.
 Messages are captured with `mu4e-action-capture-message'."
-    (interactive)
+  (interactive)
   (unless mu4e-captured-message
     (mu4e-warn "No message has been captured"))
-  (let ((path (plist-get mu4e-captured-message :path)))
-    (unless (file-exists-p path)
-      (mu4e-warn "Captured message file not found"))
-    (mml-attach-file
-      path
-      "message/rfc822"
-      (or (plist-get mu4e-captured-message :subject) "No subject")
-      "attachment")))
+  (mu4e-compose-attach-message mu4e-captured-message))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
@@ -215,8 +254,8 @@ If needed, set the Fcc header, and register the handler function."
     (when fccfile
       (message-add-header (concat "Fcc: " fccfile "\n"))
       ;; sadly, we cannot define as 'buffer-local'...  this will screw up gnus
-       ;; etc. if you run it after mu4e so, (hack hack) we reset it to the old
-       ;; handler after we've done our thing.
+      ;; etc. if you run it after mu4e so, (hack hack) we reset it to the old
+      ;; handler after we've done our thing.
       (setq message-fcc-handler-function
 	(lexical-let ((maildir mdir) (old-handler message-fcc-handler-function))
 	  (lambda (file)
@@ -249,6 +288,7 @@ appear on disk."
       (mu4e~draft-insert-mail-header-separator)
       ;; hide some headers again
       (mu4e~compose-hide-headers)
+      (widen)
       (set-buffer-modified-p nil)
       (mu4e-message "Saved (%d lines)" (count-lines (point-min) (point-max)))
       ;; update the file on disk -- ie., without the separator
@@ -267,7 +307,7 @@ appear on disk."
       ;; our contacts are already sorted - just need to tell the
       ;; completion machinery not to try to undo that...
       '(metadata
-	 (display-sort-function . mu4e~sort-contacts-for-completion) 
+	 (display-sort-function . mu4e~sort-contacts-for-completion)
 	 (cycle-sort-function   . mu4e~sort-contacts-for-completion)))))
 
 (defun mu4e~compose-complete-contact (&optional start)
@@ -315,7 +355,54 @@ message-thread by removing the In-Reply-To header."
       (define-key map (kbd "C-S-u")   'mu4e-update-mail-and-index)
       (define-key map (kbd "C-c C-u") 'mu4e-update-mail-and-index)
       (define-key map (kbd "C-c C-k") 'mu4e-message-kill-buffer)
+      (define-key map (kbd "M-q")     'mu4e-fill-paragraph)
       map)))
+
+(defun mu4e-fill-paragraph (&optional region)
+  "If `use-hard-newlines', takes a multi-line paragraph and makes
+it into a single line of text.  Assume paragraphs are separated
+by blank lines.  If `use-hard-newlines' is not enabled, this
+simply executes `fill-paragraph'."
+  ;; Inspired by https://www.emacswiki.org/emacs/UnfillParagraph
+  (interactive (progn (barf-if-buffer-read-only) '(t)))
+  (if mu4e-compose-format-flowed
+    (let ((fill-column (point-max))
+       (use-hard-newlines nil)); rfill "across" hard newlines
+      (delete-trailing-whitespace)
+      (fill-paragraph nil region))
+    (delete-trailing-whitespace)
+    (fill-paragraph nil region)))
+
+(defun mu4e-toggle-use-hard-newlines ()
+  (interactive)
+  (setq use-hard-newlines (not use-hard-newlines))
+  (if use-hard-newlines
+    (turn-off-auto-fill)
+    (turn-on-auto-fill)))
+
+(defun mu4e~compose-remap-faces ()
+  "Our parent `message-mode' uses font-locking for the compose
+buffers; lets remap its faces so it uses the ones for mu4e."
+  ;; normal headers
+  (face-remap-add-relative 'message-header-name
+    '((:inherit mu4e-header-key-face)))
+  (face-remap-add-relative 'message-header-other
+    '((:inherit mu4e-header-value-face)))
+  ;; special headers
+  (face-remap-add-relative 'message-header-from
+    '((:inherit mu4e-contact-face)))
+  (face-remap-add-relative 'message-header-to
+    '((:inherit mu4e-contact-face)))
+  (face-remap-add-relative 'message-header-cc
+    '((:inherit mu4e-contact-face)))
+  (face-remap-add-relative 'message-header-bcc
+    '((:inherit mu4e-contact-face)))
+  (face-remap-add-relative 'message-header-subject
+    '((:inherit mu4e-special-header-value-face)))
+  ;; citation
+  (face-remap-add-relative 'message-cited-text
+    '((:inherit mu4e-cited-1-face))))
+
 
 (defvar mu4e-compose-mode-abbrev-table nil)
 (define-derived-mode mu4e-compose-mode message-mode "mu4e:compose"
@@ -323,13 +410,17 @@ message-thread by removing the In-Reply-To header."
 \\{message-mode-map}."
   (progn
     (use-local-map mu4e-compose-mode-map)
-
-    (set (make-local-variable 'global-mode-string) '(:eval (mu4e-context-label)))
-
+    (make-local-variable 'global-mode-string)
+    (add-to-list 'global-mode-string '(:eval (mu4e-context-label)))
     (set (make-local-variable 'message-signature) mu4e-compose-signature)
     ;; set this to allow mu4e to work when gnus-agent is unplugged in gnus
     (set (make-local-variable 'message-send-mail-real-function) nil)
     (make-local-variable 'message-default-charset)
+    ;; Set to nil to enable `electric-quote-local-mode' to work:
+    (set (make-variable-buffer-local 'comment-use-syntax) nil)
+    ;; message-mode has font-locking, but uses its own faces. Let's
+    ;; use the mu4e-specific ones instead
+    (mu4e~compose-remap-faces)
     ;; if the default charset is not set, use UTF-8
     (unless message-default-charset
       (setq message-default-charset 'utf-8))
@@ -341,17 +432,57 @@ message-thread by removing the In-Reply-To header."
     ;; useful e.g. when finding an attachment file the directory the current
     ;; mail files lives in...
     (setq default-directory (expand-file-name "~/"))
-
     ;; offer completion for e-mail addresses
     (when mu4e-compose-complete-addresses
       (mu4e~compose-setup-completion))
+
+    (when mu4e-compose-format-flowed
+      (turn-off-auto-fill)
+      (setq truncate-lines nil
+	word-wrap t
+	use-hard-newlines t)
+      (visual-line-mode t))
+
+    (let ((keymap (lookup-key message-mode-map [menu-bar text])))
+      (when keymap
+	(define-key-after
+	  keymap
+	  [mu4e-hard-newlines]
+	  '(menu-item "Format=flowed" mu4e-toggle-use-hard-newlines
+		      :button (:toggle . use-hard-newlines)
+		      :help "Toggle format=flowed"
+		      :visible (eq major-mode 'mu4e-compose-mode)
+		      :enable mu4e-compose-format-flowed)
+	  'sep)
+
+	(define-key-after
+	  keymap
+	  [mu4e-electric-quote-mode]
+	  '(menu-item "Electric quote" electric-quote-local-mode
+		      :button (:toggle . electric-quote-mode)
+		      :help "Toggle Electric quote mode"
+		      :visible (and (eq major-mode 'mu4e-compose-mode)
+				    (functionp 'electric-quote-local-mode)))
+	  'mu4e-hard-newlines)))
+
+    (when (lookup-key mml-mode-map [menu-bar Attachments])
+      (define-key-after
+	(lookup-key mml-mode-map [menu-bar Attachments])
+	[mu4e-compose-attach-captured-message]
+	'(menu-item "Attach captured message"
+	   mu4e-compose-attach-captured-message
+	   :help "Attach message captured in Headers View (with 'a c')"
+	   :visible (eq major-mode 'mu4e-compose-mode))
+	(quote Attach\ External...)))
 
     ;; setup the fcc-stuff, if needed
     (add-hook 'message-send-hook
       (lambda () ;; mu4e~compose-save-before-sending
 	;; when in-reply-to was removed, remove references as well.
-	(when (eq mu4e~compose-type 'reply)
+	(when (eq mu4e-compose-type 'reply)
 	  (mu4e~remove-refs-maybe))
+	(when use-hard-newlines
+	  (mu4e-send-harden-newlines))
 	;; for safety, always save the draft before sending
 	(set-buffer-modified-p t)
 	(save-buffer)
@@ -366,11 +497,16 @@ message-thread by removing the In-Reply-To header."
   ;;  (put 'mu4e~compose-save-before-sending 'permanent-local-hook t)
   (put 'mu4e~compose-mark-after-sending 'permanent-local-hook t))
 
+(defun mu4e-send-harden-newlines ()
+  "Set the hard property to all newlines."
+  (save-excursion
+    (goto-char (point-min))
+    (while (search-forward "\n" nil t)
+      (put-text-property (1- (point)) (point) 'hard t))))
+
 (defconst mu4e~compose-buffer-max-name-length 30
   "Maximum length of the mu4e-send-buffer-name.")
 
-(defvar mu4e~compose-type nil
-  "Compose-type for this buffer.")
 
 (defun mu4e~compose-set-friendly-buffer-name (&optional compose-type)
   "Set some user-friendly buffer name based on the compose type."
@@ -384,7 +520,18 @@ message-thread by removing the In-Reply-To header."
     (rename-buffer (generate-new-buffer-name
 		     (truncate-string-to-width str
 		       mu4e~compose-buffer-max-name-length
-		       nil nil t)))))
+		       nil nil t)
+		     (buffer-name)))))
+
+(defun mu4e~compose-crypto-reply (parent compose-type)
+  "When composing a reply to an encrypted message, we can
+automatically encrypt that reply."
+  (when (and  (eq compose-type 'reply)
+	  (and parent (member 'encrypted (mu4e-message-field parent :flags))))
+	(case mu4e-compose-crypto-reply-policy
+	  (sign (mml-secure-message-sign))
+	  (encrypt (mml-secure-message-encrypt))
+	  (sign-and-encrypt (mml-secure-message-sign-encrypt)))))
 
 (defun* mu4e~compose-handler (compose-type &optional original-msg includes)
   "Create a new draft message, or open an existing one.
@@ -398,7 +545,7 @@ COMPOSE-TYPE is `new', ORIGINAL-MSG should be nil.
 Optionally (when forwarding, replying) ORIGINAL-MSG is the original
 message we will forward / reply to.
 
-Optionally (when forwarding) INCLUDES contains a list of
+Optionally (when inline forwarding) INCLUDES contains a list of
    (:file-name <filename> :mime-type <mime-type> :disposition <disposition>)
 for the attachements to include; file-name refers to
 a file which our backend has conveniently saved for us (as a
@@ -409,50 +556,80 @@ tempfile)."
   ;; message being forwarded or replied to, otherwise it is nil.
   (set (make-local-variable 'mu4e-compose-parent-message) original-msg)
   (put 'mu4e-compose-parent-message 'permanent-local t)
+    ;; remember the compose-type
+  (set (make-local-variable 'mu4e-compose-type) compose-type)
+  (put 'mu4e-compose-type 'permanent-local t)
   ;; maybe switch the context
   (mu4e~context-autoswitch mu4e-compose-parent-message
-			   mu4e-compose-context-policy)
+    mu4e-compose-context-policy)
   (run-hooks 'mu4e-compose-pre-hook)
 
   ;; this opens (or re-opens) a messages with all the basic headers set.
-  (condition-case nil
+  (let ((winconf (current-window-configuration)))
+    (condition-case nil
       (mu4e-draft-open compose-type original-msg)
-    (quit (kill-buffer) (mu4e-message "Operation aborted")
-          (return-from mu4e~compose-handler)))
+      (quit (set-window-configuration winconf)
+	(mu4e-message "Operation aborted")
+	(return-from mu4e~compose-handler))))
   ;; insert mail-header-separator, which is needed by message mode to separate
   ;; headers and body. will be removed before saving to disk
   (mu4e~draft-insert-mail-header-separator)
-  ;; include files -- e.g. when forwarding a message with attachments,
-  ;; we take those from the original.
+  ;; maybe encrypt/sign replies
+  (mu4e~compose-crypto-reply original-msg compose-type)
+  ;; include files -- e.g. when inline forwarding a message with
+  ;; attachments, we take those from the original.
   (save-excursion
     (goto-char (point-max)) ;; put attachments at the end
-    (dolist (att includes)
-      (mml-attach-file
-	(plist-get att :file-name) (plist-get att :mime-type))))
+
+    (if (and (eq compose-type 'forward) mu4e-compose-forward-as-attachment)
+	(mu4e-compose-attach-message original-msg)
+      (dolist (att includes)
+	(mml-attach-file
+	 (plist-get att :file-name) (plist-get att :mime-type)))))
   ;; buffer is not user-modified yet
   (mu4e~compose-set-friendly-buffer-name compose-type)
   (set-buffer-modified-p nil)
   ;; now jump to some useful positions, and start writing that mail!
-  
+
   (if (member compose-type '(new forward))
     (message-goto-to)
-    (message-goto-body))
+    ;; otherwise, it depends...
+    (case message-cite-reply-position
+      ((above traditional)
+	(message-goto-body))
+      (t
+	(when (message-goto-signature)
+	  (forward-line -2)))))
+
   ;; bind to `mu4e-compose-parent-message' of compose buffer
   (set (make-local-variable 'mu4e-compose-parent-message) original-msg)
   (put 'mu4e-compose-parent-message 'permanent-local t)
-  ;; remember the compose-type
-  (set (make-local-variable 'mu4e~compose-type) compose-type)
-  (put 'mu4e~compose-type 'permanent-local t)
-  
-   ;; hide some headers
+
+  ;; hide some headers
   (mu4e~compose-hide-headers)
   ;; switch on the mode
   (mu4e-compose-mode)
+
+  ;; set mu4e-compose-type once more for this buffer,
+  ;; we loose it after the mode-change, it seems
+  (set (make-local-variable 'mu4e-compose-type) compose-type)
+  (put 'mu4e-compose-type 'permanent-local t)
+
   (when mu4e-compose-in-new-frame
     ;; make sure to close the frame when we're done with the message these are
     ;; all buffer-local;
     (push 'delete-frame message-exit-actions)
     (push 'delete-frame message-postpone-actions)))
+
+(defun mu4e~switch-back-to-mu4e-buffer ()
+  "Try to go back to some previous buffer, in the order view->headers->main."
+  (unless (eq mu4e-split-view 'single-window)
+    (if (buffer-live-p (mu4e-get-view-buffer))
+	(switch-to-buffer (mu4e-get-view-buffer))
+      (if (buffer-live-p (mu4e-get-headers-buffer))
+	  (switch-to-buffer (mu4e-get-headers-buffer))
+	;; if all else fails, back to the main view
+	(when (fboundp 'mu4e) (mu4e))))))
 
 (defun mu4e-sent-handler (docid path)
   "Handler function, called with DOCID and PATH for the just-sent
@@ -465,17 +642,10 @@ the appropriate flag at the message forwarded or replied-to."
   ;; this seems a bit hamfisted...
   (dolist (buf (buffer-list))
     (when (and (buffer-file-name buf)
-               (string= (buffer-file-name buf) path))
+	    (string= (buffer-file-name buf) path))
       (if message-kill-buffer-on-exit
 	  (kill-buffer buf))))
-  ;; now, try to go back to some previous buffer, in the order
-  ;; view->headers->main
-  (if (buffer-live-p mu4e~view-buffer)
-      (switch-to-buffer mu4e~view-buffer)
-      (if (buffer-live-p mu4e~headers-buffer)
-          (switch-to-buffer mu4e~headers-buffer)
-          ;; if all else fails, back to the main view
-          (when (fboundp 'mu4e) (mu4e))))
+  (mu4e~switch-back-to-mu4e-buffer)
   (mu4e-message "Message sent"))
 
 (defun mu4e-message-kill-buffer ()
@@ -489,12 +659,7 @@ It restores mu4e window layout after killing the compose-buffer."
       ;; Restore mu4e
       (if mu4e-compose-in-new-frame
 	  (delete-frame)
-	(if (buffer-live-p mu4e~view-buffer)
-	    (switch-to-buffer mu4e~view-buffer)
-	  (if (buffer-live-p mu4e~headers-buffer)
-	      (switch-to-buffer mu4e~headers-buffer)
-	    ;; if all else fails, back to the main view
-	    (when (fboundp 'mu4e) (mu4e))))))))
+	(mu4e~switch-back-to-mu4e-buffer)))))
 
 (defun mu4e~compose-set-parent-flag (path)
   "Set the 'replied' \"R\" flag on messages we replied to, and the
@@ -558,18 +723,20 @@ is a symbol, one of `reply', `forward', `edit', `resend'
       (mu4e~compose-handler 'new)
       ;; otherwise, we need the doc-id
       (let* ((docid (mu4e-message-field msg :docid))
-	;; decrypt (or not), based on `mu4e-decryption-policy'.
-	(decrypt
-	  (and (member 'encrypted (mu4e-message-field msg :flags))
-	    (if (eq mu4e-decryption-policy 'ask)
-	      (yes-or-no-p (mu4e-format "Decrypt message?"))
-	      mu4e-decryption-policy))))
-	;; if there's a visible view window, select that before starting composing
-	;; a new message, so that one will be replaced by the compose window. The
-	;; 10-or-so line headers buffer is not a good place to write it...
-	(let ((viewwin (get-buffer-window mu4e~view-buffer)))
-	  (when (window-live-p viewwin)
-	    (select-window viewwin)))
+	      ;; decrypt (or not), based on `mu4e-decryption-policy'.
+	      (decrypt
+		(and (member 'encrypted (mu4e-message-field msg :flags))
+		  (if (eq mu4e-decryption-policy 'ask)
+		    (yes-or-no-p (mu4e-format "Decrypt message?"))
+		    mu4e-decryption-policy))))
+	;; if there's a visible view window, select that before starting
+	;; composing a new message, so that one will be replaced by the compose
+	;; window. The 10-or-so line headers buffer is not a good place to write
+	;; it...
+	(unless (eq mu4e-split-view 'single-window)
+	  (let ((viewwin (get-buffer-window (mu4e-get-view-buffer))))
+	    (when (window-live-p viewwin)
+	      (select-window viewwin))))
 	;; talk to the backend
 	(mu4e~proc-compose compose-type decrypt docid)))))
 
@@ -600,7 +767,6 @@ draft message."
   (interactive)
   (mu4e-compose 'new))
 
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; mu4e-compose-func and mu4e-send-func are wrappers so we can set ourselves
@@ -625,7 +791,10 @@ draft message."
 
   ;; add any other headers specified
   (when other-headers
-    (message-add-header other-headers))
+    (dolist (h other-headers other-headers)
+      (if (symbolp (car h)) (setcar h (symbol-name (car h))))
+      (message-add-header (concat (capitalize (car h)) ": " (cdr h) "\n"  ))
+      ))
 
   ;; yank message
   (if (bufferp yank-action)
@@ -652,24 +821,8 @@ draft message."
 ;; returning the symbol is probably the correct thing to do, as other
 ;; such functions suggest.
 (defun mu4e-user-agent ()
+  "Return the `mu4e-user-agent' symbol."
   'mu4e-user-agent)
-
-(defun mu4e~compose-browse-url-mail (url &optional ignored)
-  "Adapter for `browse-url-mailto-function."
-  (let* ((headers (rfc2368-parse-mailto-url url))
-	  (to (cdr (assoc "To" headers)))
-	  (subject (cdr (assoc "Subject" headers)))
-	  (body (cdr (assoc "Body" headers))))
-    (mu4e~compose-mail to subject)
-    (if body
-      (progn
-	(message-goto-body)
-	(insert body)
-	(if (not to)
-	  (message-goto-to)
-	  (if (not subject)
-	    (message-goto-subject)
-	    (message-goto-body)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -692,7 +845,7 @@ Go to the end of the message (before signature) or, if already there, go to the
 end of the buffer."
   (interactive)
   (let ((old-position (point))
-        (message-position (save-excursion (message-goto-body) (point))))
+	 (message-position (save-excursion (message-goto-body) (point))))
     (goto-char (point-max))
     (when (re-search-backward message-signature-separator message-position t)
       (forward-line -1))
